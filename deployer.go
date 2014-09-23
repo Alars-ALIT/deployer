@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/armon/consul-api"
-	//spew "github.com/davecgh/go-spew/spew"
+	spew "github.com/davecgh/go-spew/spew"
 	dockerapi "github.com/fsouza/go-dockerclient"
 	"os/exec"
 	"strings"
@@ -26,6 +26,25 @@ import (
 type Deployer struct {
 	docker *dockerapi.Client
 	consul *ConsulStore
+}
+
+type ContainerInfo struct {
+	Name string
+	Path string
+}
+
+func NewContainerInfo(container *dockerapi.Container) ContainerInfo {
+	var name string
+	var path string
+	for _, kv := range container.Config.Env {
+		kvp := strings.SplitN(kv, "=", 2)
+		if kvp[0] == "DEPLOYER_NAME" {
+			name = kvp[1]
+		} else if kvp[0] == "APP_PATH" {
+			path = kvp[1]
+		}
+	}
+	return ContainerInfo{name, path}
 }
 
 func NewDeployer(url *url.URL) *Deployer {
@@ -67,7 +86,7 @@ func (d *Deployer) ListenForDeployEvent(prefix string) (int, error) {
 			return 0, err
 		}
 		for _, pair := range pairs {
-			var deploy DeployRequest
+			var deploy DeployInfo
 			err := json.Unmarshal(pair.Value, &deploy)
 			assert(err)
 			fmt.Println("Deploying:", pair.Key, string(pair.Value))
@@ -76,7 +95,7 @@ func (d *Deployer) ListenForDeployEvent(prefix string) (int, error) {
 	}
 }
 
-func (d *Deployer) NotifyDeploy(deploy DeployRequest) {
+func (d *Deployer) NotifyDeploy(deploy DeployInfo) {
 	json, err := json.Marshal(deploy)
 	assert(err)
 	d.consul.Put("deployer", json)
@@ -112,16 +131,17 @@ func (d *Deployer) build(basePath string, appName string) {
 	buildErr := d.docker.BuildImage(opts)
 	assert(buildErr)
 	fmt.Printf("built: %s\n", appName)
+	spew.Dump(outputbuf)
 }
 
-func (d *Deployer) runDeplyScript(deploy DeployRequest) {
+func (d *Deployer) runDeplyScript(deploy DeployInfo) {
 	cmd := exec.Command("bash", "-c", "/go/src/deployer/default-deploy.sh")
 	cmd.Env = []string{"APP=" + deploy.ApplicationName, "BRANCH=" + deploy.Branch}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Run()
 }
 
-func (d *Deployer) shouldContainerDeploy(container *dockerapi.Container, deploy DeployRequest) bool {
+func (d *Deployer) shouldContainerDeploy(container *dockerapi.Container, deploy DeployInfo) bool {
 	for _, kv := range container.Config.Env {
 		kvp := strings.SplitN(kv, "=", 2)
 		if kvp[0] == "DEPLOYER_NAME" {
@@ -133,39 +153,36 @@ func (d *Deployer) shouldContainerDeploy(container *dockerapi.Container, deploy 
 	return false
 }
 
-func (d *Deployer) Deploy(deploy DeployRequest) {
-	//fmt.Println("Restarting: ", name)
+func (d *Deployer) Deploy(deploy DeployInfo) {
 	containers, err := d.docker.ListContainers(dockerapi.ListContainersOptions{})
 	assert(err)
 	deployed := 0
 	for _, container := range containers {
-		//spew.Dump(container)
 		inspectedContainer, err := d.docker.InspectContainer(container.ID)
 		assert(err)
 		if inspectedContainer.State.Running {
 			//spew.Dump(inspectedContainer)
 			//spew.Dump(inspectedContainer.Volumes)
-			//for key := range inspectedContainer.Volumes {
-			//if key == "/data" && container.Image == deploy.ApplicationName {
-			if d.shouldContainerDeploy(inspectedContainer, deploy) {
-				appDir := "/data/" + deploy.ApplicationName + "-" + deploy.Branch
+			containerInfo := NewContainerInfo(inspectedContainer)
+			if containerInfo.Name == deploy.ApplicationName { //d.shouldContainerDeploy(inspectedContainer, deploy) {
+				//appDir := "/data/" + deploy.ApplicationName + "-" + deploy.Branch
 
 				//1: run deploy script
-				d.runDeplyScript(deploy)
+				//d.runDeplyScript(deploy)
 
-				fmt.Println("Building: ", appDir+"/Dockerfile")
+				fmt.Println("Building: ", containerInfo.Path+"/Dockerfile")
 				//1.5: build image
-				d.build(appDir, deploy.ApplicationName)
+				d.build(containerInfo.Path, deploy.ApplicationName)
 
 				//2: Create and start new container
-				createdContainer, createErr := d.docker.CreateContainer(dockerapi.CreateContainerOptions{
+				createdContainer, err := d.docker.CreateContainer(dockerapi.CreateContainerOptions{
 					Config: inspectedContainer.Config,
 				})
-				assert(createErr)
+				assert(err)
 				fmt.Println("Created: ", createdContainer.ID)
 
 				fmt.Println("Starting: ", createdContainer.ID)
-				err := d.docker.StartContainer(createdContainer.ID, inspectedContainer.HostConfig)
+				err = d.docker.StartContainer(createdContainer.ID, inspectedContainer.HostConfig)
 				assert(err)
 
 				//3: TODO disable old in loadbalancer

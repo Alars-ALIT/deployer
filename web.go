@@ -12,7 +12,7 @@ type WebServer struct {
 	deployer *Deployer
 }
 
-type DeployRequest struct {
+type DeployInfo struct {
 	ApplicationName string
 	Branch          string
 	Time            time.Time
@@ -20,7 +20,7 @@ type DeployRequest struct {
 
 func (server *WebServer) handler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deploy := DeployRequest{
+	deploy := DeployInfo{
 		ApplicationName: vars["app"],
 		Branch:          vars["branch"],
 		Time:            time.Now(),
